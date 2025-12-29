@@ -1,7 +1,9 @@
 "use client";
 
-import { db } from "@/lib/firebase";
-import { onValue, ref, set } from "firebase/database";
+import { auth, db } from "@/lib/firebase";
+import { onAuthStateChanged, signOut } from "firebase/auth";
+import { get, onValue, ref, set } from "firebase/database";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 export default function Dashboard() {
@@ -9,7 +11,25 @@ export default function Dashboard() {
   const [controls, setControls] = useState({});
   const [city, setCity] = useState("Dhaka");
   const [weather, setWeather] = useState(null);
-  
+  const router = useRouter();
+  const [role, setRole] = useState(null);
+
+  useEffect(() => {
+  const unsub = onAuthStateChanged(auth, async (user) => {
+    if (!user) {
+      router.push("/login");
+      return;
+    }
+
+    const snap = await get(ref(db, `users/${user.uid}`));
+    if (snap.exists()) {
+      setRole(snap.val().role);
+    }
+  });
+
+  return () => unsub();
+}, []);
+
   useEffect(() => {
     onValue(ref(db, "sensors"), snap => {
       setSensors(snap.val());
@@ -20,7 +40,7 @@ export default function Dashboard() {
     });
   }, []);
 
-  
+
 
   /* ---------- WEATHER FETCH (NO API KEY) ---------- */
   useEffect(() => {
@@ -56,13 +76,25 @@ export default function Dashboard() {
     fetchWeather();
   }, [city]);
 
-const toggle = (key, value) => {
+  const toggle = (key, value) => {
     set(ref(db, `controls/${key}`), value);
   };
 
   return (
     <main className="min-h-screen bg-gray-100 p-8">
-      <h1 className="text-3xl font-bold mb-6">🌐 IoT Protection Dashboard</h1>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-3xl font-bold">🌐 IoT Protection Dashboard</h1>
+
+        <button
+          onClick={() => {
+            signOut(auth);
+            router.push("/login");
+          }}
+          className="bg-red-600 text-white px-4 py-2 rounded"
+        >
+          Logout
+        </button>
+      </div>
 
       {/* Sensor Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
@@ -82,26 +114,26 @@ const toggle = (key, value) => {
       </div>
 
       {/* Controls */}
-      <div className="bg-white p-6 rounded shadow">
-        <h2 className="text-xl font-semibold mb-4">Controls</h2>
-
-        <Toggle
-          label="System"
-          value={controls?.system}
-          onClick={() => toggle("system", !controls?.system)}
-        />
-        <Toggle
-          label="Cloth Protection"
-          value={controls?.servo1}
-          onClick={() => toggle("servo1", !controls?.servo1)}
-        />
-        <Toggle
-          label="Wiper"
-          value={controls?.servo2}
-          onClick={() => toggle("servo2", !controls?.servo2)}
-        />
-      </div>
-       {/* WEATHER */}
+      {role === "admin" && (
+  <section title="Controls">
+    <Toggle
+      label="System"
+      value={controls.system}
+      onClick={() => toggle("system")}
+    />
+    <Toggle
+      label="Servo 1"
+      value={controls.servo1}
+      onClick={() => toggle("servo1")}
+    />
+    <Toggle
+      label="Servo 2"
+      value={controls.servo2}
+      onClick={() => toggle("servo2")}
+    />
+  </section>
+)}
+      {/* WEATHER */}
 
       <section title="🌦Weather Forecast (Free)">
         <input
@@ -122,8 +154,8 @@ const toggle = (key, value) => {
         ) : (
           <p>Loading weather…</p>
         )}
-        </section>
-        
+      </section>
+
     </main>
   );
 }
