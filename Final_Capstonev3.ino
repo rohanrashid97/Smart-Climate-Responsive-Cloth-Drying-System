@@ -1,104 +1,182 @@
-#include <Servo.h>
-#include <ESP8266WiFi.h>
-#include <DHT.h>
-#include <ArduinoJson.h>
-#include <WiFiClientSecure.h>
-// ------------------- Pins -------------------
-#define DHT_PIN D5 //humidity and temparature
-#define SERVO1_PIN D4 //shade
-#define SERVO2_PIN D2 //wiper
-#define LDR_PIN D0  //day night           // as used before
-#define RAIN_SENSOR_PIN D6  //rain
-#define RAIN_SENSOR_VCC D7  //rain sensor power
-#define DHT_TYPE DHT22 //Ty
+#include <Servo.h>              // Library to control servo motors
+#include <ESP8266WiFi.h>        // WiFi control library for ESP8266
+#include <DHT.h>                // Library for DHT temperature & humidity sensor
+#include <ArduinoJson.h>        // Used to encode/decode JSON data (Firebase)
+#include <WiFiClientSecure.h>   // Enables HTTPS communication with Firebase
 
-// ------------------- Config -------------------
+// =====================================================
+// ------------------- PIN DEFINITIONS -----------------
+// =====================================================
+
+// DHT22 sensor pin
+// Reads Temperature (°C) and Humidity (%)
+#define DHT_PIN D5
+
+// Servo motor pins
+#define SERVO1_PIN D4           // Servo1 → Shade / Roof / Protection Cover
+#define SERVO2_PIN D2           // Servo2 → Wiper mechanism
+
+// LDR sensor pin
+// Used to detect DAY or NIGHT
+#define LDR_PIN D0              // Lower value = brighter light (day)
+
+// Rain sensor pins
+#define RAIN_SENSOR_PIN D6      // Digital rain signal (LOW = rain)
+#define RAIN_SENSOR_VCC D7      // Power supply for rain sensor
+
+// DHT sensor type
+#define DHT_TYPE DHT22
+
+// =====================================================
+// ---------------- WIFI & FIREBASE CONFIG --------------
+// =====================================================
+
+// WiFi credentials (ESP8266 requires 2.4GHz WiFi)
 const char* ssid = "We Are CSEian_2.4G";
 const char* password = "@wercseian";
 
+// Firebase Realtime Database host and authentication token
 const char* firebaseHost = "protection-system-b6781-default-rtdb.firebaseio.com";
 const char* firebaseAuth = "Gdd1dXrsUmxet4wfj0ERZGCAiEC8geTP2G7aI2D6";
 
-const char* sensorsPath = "/sensors.json";
+// Firebase database paths
+// sensorsPath  → ESP uploads sensor values here
+// controlsPath → ESP reads control commands from here
+const char* sensorsPath  = "/sensors.json";
 const char* controlsPath = "/controls.json";
 
-const int lightThreshold = 300;            // LOW = day
-const unsigned long dhtInterval = 2000;    // DHT read interval
+// =====================================================
+// ------------------- SYSTEM PARAMETERS ----------------
+// =====================================================
 
-// DHT protection thresholds
-const float TEMP_PROTECT_C = 30.0;         // temp > 30°C → protect
-const float HUM_PROTECT_PCT = 98.0;        // humidity ≥ 98% → protect
+// LDR threshold value
+// If LDR value ≤ threshold → DAY
+// If LDR value > threshold → NIGHT
+const int lightThreshold = 300;
 
-// Servo2 (wiper) efficiency config
-const unsigned long WIPE_GAP = 5000;     // 2 minutes gap
+// Interval for reading DHT sensor (milliseconds)
+const unsigned long dhtInterval = 2000;
+
+// Environmental protection thresholds
+const float TEMP_PROTECT_C = 30.0;   // Above 30°C → protection required
+const float HUM_PROTECT_PCT = 98.0;  // Above 98% humidity → protection required
+
+// Servo2 (wiper) timing configuration
+// Prevents continuous wiping to save power
+const unsigned long WIPE_GAP = 5000; // Delay between wipes
 unsigned long lastWipeTime = 0;
 
-// ------------------- Globals -------------------
-Servo servo1;
-Servo servo2;
+// =====================================================
+// ------------------- GLOBAL OBJECTS -------------------
+// =====================================================
+
+// Servo objects
+Servo servo1;     // Controls shade/cover
+Servo servo2;     // Controls wiper
+
+// DHT sensor object
 DHT dht(DHT_PIN, DHT_TYPE);
 
-unsigned long lastDhtRead = 0;
-int currentLogicalServo1Angle = -1;
-
+// HTTPS client for Firebase
 WiFiClientSecure client;
 
-bool systemEnabled = true;
-bool servo1Enabled = true;
-bool servo2Enabled = true;
-// ------------------- Servo1 helper (direction fixed) -------------------
+// Stores last DHT read timestamp
+unsigned long lastDhtRead = 0;
+
+// Stores last servo1 angle to avoid repeated movement
+int currentLogicalServo1Angle = -1;
+
+// Control flags read from Firebase dashboard
+bool systemEnabled = true;   // Master ON/OFF switch
+bool servo1Enabled = true;   // Permission for servo1
+bool servo2Enabled = true;   // Permission for servo2
+
+// =====================================================
+// ---------------- SERVO1 HELPER FUNCTION --------------
+// =====================================================
+// This function:
+// 1. Limits angle between 0–180
+// 2. Avoids unnecessary servo movement
+// 3. Fixes inverted mechanical mounting
 void setServo1(int angle) {
+
+  // Ensure valid servo angle
   angle = constrain(angle, 0, 180);
+
+  // If the servo is already at this angle, do nothing
   if (angle == currentLogicalServo1Angle) return;
+
+  // Save current angle
   currentLogicalServo1Angle = angle;
-  servo1.write(180 - angle);   // inverted direction
+
+  // Write inverted angle due to mechanical orientation
+  servo1.write(180 - angle);
 }
 
+// =====================================================
+// ----------------------- SETUP ------------------------
+// =====================================================
 void setup() {
+
+  // Attach servo motors with pulse width limits
   servo1.attach(SERVO1_PIN, 500, 2400);
   servo2.attach(SERVO2_PIN);
 
-  setServo1(0);
-  servo2.write(0);
+  // Set initial servo positions
+  setServo1(0);     // Shade open
+  servo2.write(0);  // Wiper stopped
 
+  // Power and configure rain sensor
   pinMode(RAIN_SENSOR_VCC, OUTPUT);
   digitalWrite(RAIN_SENSOR_VCC, HIGH);
   pinMode(RAIN_SENSOR_PIN, INPUT);
 
+  // Start serial communication for debugging
   Serial.begin(9600);
   delay(50);
 
+  // Initialize DHT sensor
   dht.begin();
   Serial.println("System started. Final efficient logic running.");
-  
+
+  // Connect to WiFi
   WiFi.begin(ssid, password);
   Serial.print("Connecting WiFi");
-  
+
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
 
   Serial.println("\nWiFi Connected");
-  client.setInsecure(); // skip SSL cert check (OK for demo)
+
+  // Disable SSL certificate verification (demo/testing purpose)
+  client.setInsecure();
 }
 
-// -------- Send Sensor Data --------
+// =====================================================
+// ------------- SEND SENSOR DATA TO FIREBASE -----------
+// =====================================================
+// Sends temperature, humidity, rain and LDR values
 void sendSensorData(float temp, float hum, bool rain, int ldr) {
+
+  // Connect to Firebase server
   if (!client.connect(firebaseHost, 443)) {
     Serial.println("Firebase connection failed");
     return;
   }
 
+  // Create JSON payload
   StaticJsonDocument<200> doc;
   doc["temperature"] = temp;
-  doc["humidity"] = hum;
-  doc["rain"] = rain;
-  doc["ldr"] = ldr;
+  doc["humidity"]    = hum;
+  doc["rain"]        = rain;
+  doc["ldr"]         = ldr;
 
   String json;
   serializeJson(doc, json);
 
+  // HTTP PUT request to Firebase
   client.println("PUT " + String(sensorsPath) + "?auth=" + firebaseAuth + " HTTP/1.1");
   client.println("Host: " + String(firebaseHost));
   client.println("Content-Type: application/json");
@@ -109,90 +187,94 @@ void sendSensorData(float temp, float hum, bool rain, int ldr) {
   Serial.println("Sensor data sent to Firebase");
 }
 
-// -------- Read Control Data --------
+// =====================================================
+// ------------- READ CONTROL DATA FROM FIREBASE --------
+// =====================================================
+// Reads system, servo1 and servo2 ON/OFF flags
 void readControls() {
+
   if (!client.connect(firebaseHost, 443)) return;
 
+  // HTTP GET request
   client.println("GET " + String(controlsPath) + "?auth=" + firebaseAuth + " HTTP/1.1");
   client.println("Host: " + String(firebaseHost));
   client.println();
-  
+
   while (client.connected() && !client.available()) delay(1);
 
   String response = client.readString();
 
-  
+  // Extract JSON data from HTTP response
   int jsonStart = response.indexOf('{');
   if (jsonStart == -1) return;
 
   String json = response.substring(jsonStart);
 
+  // Parse JSON
   StaticJsonDocument<200> doc;
-  DeserializationError error = deserializeJson(doc, json);
-  if (error) return;
+  if (deserializeJson(doc, json)) return;
 
+  // Update control flags
   systemEnabled = doc["system"];
   servo1Enabled = doc["servo1"];
   servo2Enabled = doc["servo2"];
-
-  Serial.println("Controls:");
-  Serial.println(response);
 }
 
+// =====================================================
+// ------------------------ LOOP ------------------------
+// =====================================================
 void loop() {
+
   unsigned long now = millis();
 
-  // -------- Sensor Reads --------
-  int ldrValue = analogRead(LDR_PIN);
-  int rainValue = digitalRead(RAIN_SENSOR_PIN); // LOW = rain
+  // -------- Sensor Reading --------
+  int ldrValue  = analogRead(LDR_PIN);          // Day/Night detection
+  int rainValue = digitalRead(RAIN_SENSOR_PIN); // Rain detection
 
   static float lastTemp = NAN;
   static float lastHum  = NAN;
 
+  // Read DHT sensor periodically
   if (now - lastDhtRead >= dhtInterval) {
     lastDhtRead = now;
+
     float h = dht.readHumidity();
     float t = dht.readTemperature();
+
     if (!isnan(h) && !isnan(t)) {
       lastTemp = t;
-      lastHum = h;
-      Serial.print("Temp: ");
-      Serial.print(t);
-      Serial.print(" C | Humidity: ");
-      Serial.print(h);
-      Serial.println(" %");
+      lastHum  = h;
     }
   }
-  
-  // -------- Read Controls from Firebase --------
+
+  // -------- Read Dashboard Controls --------
   readControls();
 
-  // -------- System OFF check --------
+  // -------- System OFF Condition --------
   if (!systemEnabled) {
     setServo1(0);
     servo2.write(0);
     delay(1000);
-    return; // skip rest of loop
+    return;
   }
 
-  // -------- Core Logic (UNCHANGED) --------
-  bool isDay = (ldrValue <= lightThreshold); // LOW = day
+  // -------- Decision Logic --------
+  bool isDay  = (ldrValue <= lightThreshold);
   bool isRain = (rainValue == LOW);
 
   bool tempProtect = (!isnan(lastTemp) && lastTemp > TEMP_PROTECT_C);
-  bool humProtect  = (!isnan(lastHum)  && lastHum >= HUM_PROTECT_PCT);
+  bool humProtect  = (!isnan(lastHum)  && lastHum  >= HUM_PROTECT_PCT);
 
   bool protect = (!isDay) || isRain || tempProtect || humProtect;
 
-  // -------- Servo1 Control (UNCHANGED) --------
-if (servo1Enabled || protect) {
-     setServo1(180);
+  // -------- Servo1 (Shade) Logic --------
+  if (servo1Enabled || protect) {
+    setServo1(180);   // Close shade
   } else {
-    setServo1(0);
+    setServo1(0);     // Open shade
   }
 
-  // -------- Servo2 NEW Efficient Wiper Logic --------
-  // ONLY: Day + Rain → wipe once every 2 minutes
+  // -------- Servo2 (Wiper) Logic --------
   if (servo2Enabled && isDay && isRain) {
     if (now - lastWipeTime >= WIPE_GAP) {
       lastWipeTime = now;
@@ -204,15 +286,10 @@ if (servo1Enabled || protect) {
     servo2.write(0);
   }
 
-  // -------- Debug --------
-  Serial.print("LDR: "); Serial.print(ldrValue);
-  Serial.print(" | Rain: "); Serial.print(isRain ? "YES" : "NO");
-  Serial.print(" | Day: "); Serial.print(isDay ? "YES" : "NO");
-  Serial.print(" | Protect: "); Serial.println(protect ? "YES" : "NO");
- 
-  // -------- Send Sensor Data to Firebase --------
+  // -------- Upload Sensor Data --------
   if (!isnan(lastTemp) && !isnan(lastHum)) {
     sendSensorData(lastTemp, lastHum, isRain, ldrValue);
   }
+
   delay(500);
 }
